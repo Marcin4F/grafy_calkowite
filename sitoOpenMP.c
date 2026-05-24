@@ -5,6 +5,9 @@
 #include <omp.h>
 
 #define vertices 16
+#define CHUNK_SIZE 2000 // liczba pobieranych grafow
+#define MAX_G6_LEN 64   // max dlugosc linii z grafem
+
 typedef unsigned int matrix[vertices];
 
 int eigensymmatrix_qr(int size, matrix original_graph, long double *values)
@@ -149,12 +152,6 @@ int main(int argc, char *argv[])
 {
     FILE *in, *out;
 
-    char BUFFOR[1024];
-    long double values[17];
-    matrix A;
-    int N;
-    int przeczytano;
-
     long num_checked = 0;
     long num_found = 0;
 
@@ -179,42 +176,57 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // współdzielone zmienne to pliki wejściowe i wyjściowe oraz ilość sprawdzonych i znalezionych grafów
-#pragma omp parallel default(none)          \
-    shared(in, out, num_checked, num_found) \
-    private(BUFFOR, A, values, N, przeczytano)
+// współdzielone zmienne to pliki wejściowe i wyjściowe oraz ilość sprawdzonych i znalezionych grafów
+#pragma omp parallel default(none) shared(in, out, num_checked, num_found)
     {
+        char local_chunk[CHUNK_SIZE][MAX_G6_LEN];
+        int local_count;
+
+        matrix A;
+        long double values[17];
+        int N;
+        int i;
+
         while (1)
         {
-            przeczytano = 0; // flaga dla danego wątku
+            local_count = 0; // flaga dla danego wątku
 
 // sekcja krytyczna (odczyt z pliku)
 #pragma omp critical(odczyt_pliku)
             {
-                if (fgets(BUFFOR, 1024, in) != NULL)
+                for (i = 0; i < CHUNK_SIZE; i++)
                 {
-                    przeczytano = 1;
-                    num_checked++;
+                    if (fgets(local_chunk[i], MAX_G6_LEN, in) != NULL)
+                    {
+                        local_count++;
+                        num_checked++;
+                    }
+                    else
+                    {
+                        break; // koniec pliku
+                    }
                 }
             }
 
             // wszystkie dane zostały przeczytane koniec pracy
-            if (!przeczytano)
+            if (local_count == 0)
             {
                 break;
             }
 
-            BMKdecode(BUFFOR, &N, A);
-            eigensymmatrix_qr(N, A, values);
-
-            if (isintegral(N, values))
+            for (i = 0; i < local_count; i++)
             {
+                BMKdecode(local_chunk[i], &N, A);
+                eigensymmatrix_qr(N, A, values);
 
+                if (isintegral(N, values))
+                {
 // sekcja krytyczna (zapis do pliku)
 #pragma omp critical(zapis_pliku)
-                {
-                    num_found++;
-                    fprintf(out, "%s", BUFFOR);
+                    {
+                        num_found++;
+                        fprintf(out, "%s", local_chunk[i]);
+                    }
                 }
             }
         }
